@@ -253,20 +253,27 @@ if [[ "$SKIP_COMPONENT_INSTALL" == "false" ]]; then
     fi
     
     log ">>> Using COMPONENT_NAME: $COMPONENT_NAME"
-    # Verify COMPONENT_NAME is in the manifest file
-    log ">>> Verifying COMPONENT_NAME is in the manifest file"
-    image_name_query=".[] | select(.[\"image-name\"]==\"${COMPONENT_NAME}\")"
-    IMAGE_NAME=$(jq -r "$image_name_query" "$snapshot_dir/$manifest_file" 2> >(tee -a "$log_file"))
-    if [[ -z "$IMAGE_NAME" ]]; then
-        log "ERROR Could not find image $COMPONENT_NAME in manifest $manifest_file"
-        log "Contents of manifest $manifest_file"
-        cat "$manifest_file" > >(tee -a "$log_file")
+    log ">>> Using COMPONENT_IMAGE_REF: $COMPONENT_IMAGE_REF"
+    # Read into array and verify COMPONENT_NAME matches length of COMPONENT_IMAGE_REF
+    IFS=',' read -r -a COMPONENT_NAME <<< "$COMPONENT_NAME"
+    IFS=',' read -r -a COMPONENT_IMAGE_REF <<< "$COMPONENT_IMAGE_REF"
+    if [[ ${#COMPONENT_NAME[@]} != ${#COMPONENT_IMAGE_REF[@]} ]]; then
+        log "ERROR Multiple components provided, but the length of COMPONENT_NAME and COMPONENT_IMAGE_REF do not match"
         exit 1
     fi
-    IMAGE_NAME="$COMPONENT_NAME"
-    log ">>> Using IMAGE_NAME: $IMAGE_NAME"
-    IMAGE_QUERY="quay.io/stolostron/${IMAGE_NAME}@sha256:[[:alnum:]]+"
-    log ">>> Using IMAGE_QUERY: $IMAGE_QUERY"
+
+    # Verify COMPONENT_NAME is in the manifest file
+    log ">>> Verifying COMPONENT_NAME is in the manifest file"
+    for component_name in "${!COMPONENT_NAME[@]}"; do
+        image_name_query=".[] | select(.[\"image-name\"]==\"${component_name}\")"
+        IMAGE_NAME=$(jq -r "$image_name_query" "$snapshot_dir/$manifest_file" 2> >(tee -a "$log_file"))
+        if [[ -z "$IMAGE_NAME" ]]; then
+            log "ERROR Could not find image $component_name in manifest $manifest_file"
+            log "Contents of manifest $manifest_file"
+            cat "$manifest_file" > >(tee -a "$log_file")
+            exit 1
+        fi
+    done
 else
     log ">>> Skipping since we're not installing a component."
 fi
@@ -659,7 +666,11 @@ deploy() {
         logf "$_log" "Deploy $_cluster: Updating CSV"
         echo "UPDATE_CSV" > "${_status}"
         # Rewrite CSV. CSV contents are in csv.json
-        sed -E "s,$IMAGE_QUERY,$COMPONENT_IMAGE_REF," csv.json > csv_update.json 2> >(tee -a "$_log")
+        for i in "${!COMPONENT_NAME[@]}"; do
+            IMAGE_QUERY="quay.io/stolostron/${COMPONENT_NAME[i]}@sha256:[[:alnum:]]+"
+            log "Replacing ${IMAGE_QUERY} with ${COMPONENT_IMAGE_REF[i]}"
+            sed -E "s,${IMAGE_QUERY},${COMPONENT_IMAGE_REF[i]}," csv.json > csv_update.json 2> >(tee -a "$_log")
+        done
         jq 'del(.metadata.uid) | del(.metadata.resourceVersion)' csv_update.json > csv_clean.json 2> >(tee -a "$_log")
         # Replace CSV on cluster
         KUBECONFIG="$_kc" oc -n $NAMESPACE replace -f csv_clean.json > >(tee -a "$_log") 2>&1 || {
